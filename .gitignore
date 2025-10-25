@@ -21,6 +21,15 @@ results/
 checkpoints/
 *.cache
 
+# PAI test results (keep documentation but exclude detailed outputs)
+whisper-edge-optimization/dendritic/audio_test_v2/
+whisper-edge-optimization/dendritic/checkpoint_test/
+whisper-edge-optimization/dendritic/fresh_test/
+whisper-edge-optimization/dendritic/mac_home_test/
+whisper-edge-optimization/dendritic/short_test/
+whisper-edge-optimization/baseline/
+whisper-edge-optimization/sweeps/
+
 # Logs
 *.log
 debug_logs/

@@ -1,0 +1,30 @@
+# AMD MI300x Requirements
+# ROCm-compatible PyTorch (install separately - see AMD_SETUP.md)
+
+# Core dependencies
+openai-whisper==20231117
+datasets==2.14.6
+transformers==4.35.0
+
+# Perforated AI
+# NOTE: Install from local PerforatedAI directory
+# pip install -e ./PerforatedAI
+
+# Audio processing
+soundfile==0.12.1
+librosa==0.10.1
+
+# ML utilities
+numpy==1.24.3
+tqdm==4.66.1
+wandb==0.15.12
+
+# Data handling
+pandas==2.0.3
+scikit-learn==1.3.2
+
+# Environment management
+python-dotenv==1.0.0
+
+# GPU monitoring (optional but recommended)
+pynvml==11.5.0  # Works with ROCm through compatibility layer
