@@ -33,6 +33,18 @@ import io
 import soundfile as sf
 import numpy as np
 
+# Suppress warnings BEFORE importing WandB (to catch Pydantic warnings during import)
+warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=UserWarning, module='pydantic')
+
+# Suppress specific Pydantic deprecation warnings from WandB
+# Issue: WandB 0.22.2 uses deprecated Pydantic 2.x Field() syntax (will be fixed in future WandB)
+try:
+    import pydantic._internal._generate_schema
+    warnings.filterwarnings('ignore', category=pydantic._internal._generate_schema.UnsupportedFieldAttributeWarning)
+except (ImportError, AttributeError):
+    pass  # Pydantic version doesn't have this warning type
+
 # Perforated AI imports
 from perforatedai import globals_perforatedai as GPA
 from perforatedai import utils_perforatedai as UPA
@@ -44,8 +56,6 @@ import wandb
 import datasets
 from datasets import load_dataset
 from torch.utils.data import DataLoader, Dataset
-
-warnings.filterwarnings('ignore')
 
 # =============================================================================
 # Dataset
@@ -201,41 +211,77 @@ def validate(model, dataloader, device, max_samples=None):
     model.train()
     return avg_wer, accuracy
 
-def train_epoch(model, dataloader, optimizer, device, epoch):
+def train_epoch(model, dataloader, optimizer, device, epoch, tokenizer):
     """
-    Train for one epoch.
+    Train for one epoch using teacher-forced decoding.
 
-    Note: This is simplified training. Full production would use:
-    - Teacher forcing for decoder
-    - Proper loss calculation
-    - Gradient accumulation
-    - Mixed precision training
+    Training process:
+    1. Encode audio to features using encoder
+    2. Tokenize text targets
+    3. Teacher-forced decoding: feed ground-truth tokens to decoder
+    4. Compute cross-entropy loss between predicted and actual tokens
+    5. Backpropagate and update weights
     """
     model.train()
     total_loss = 0
     num_batches = 0
 
+    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+
     for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch}")):
         mel = batch['mel'].to(device)
         text = batch['text']
 
-        # TODO: Implement proper Whisper training loss
-        # For now, this is a placeholder
-        # Real implementation would:
-        # 1. Tokenize text
-        # 2. Teacher-forced decoding
-        # 3. Cross-entropy loss
-        # 4. Backprop
+        # Step 1: Tokenize text to target token IDs
+        # Prepend SOT token, append EOT token
+        target_tokens = []
+        for t in text:
+            tokens = [tokenizer.sot] + tokenizer.encode(t) + [tokenizer.eot]
+            target_tokens.append(tokens)
 
-        # Placeholder loss (will be replaced with real implementation)
-        # outputs = model(mel, ...)
-        # loss = criterion(outputs, targets)
-        # loss.backward()
-        # optimizer.step()
-        # optimizer.zero_grad()
+        # Pad sequences to same length in batch
+        max_len = max(len(t) for t in target_tokens)
+        padded_tokens = []
+        padded_labels = []
 
-        # For now, just do validation-based training (common in PAI)
-        pass
+        for tokens in target_tokens:
+            # Input: all tokens except last (for teacher forcing)
+            input_tokens = tokens[:-1] + [tokenizer.eot] * (max_len - len(tokens))
+            # Label: all tokens except first (what we predict)
+            label_tokens = tokens[1:] + [-100] * (max_len - len(tokens))
+
+            padded_tokens.append(input_tokens)
+            padded_labels.append(label_tokens)
+
+        # Convert to tensors
+        input_ids = torch.tensor(padded_tokens, dtype=torch.long).to(device)
+        labels = torch.tensor(padded_labels, dtype=torch.long).to(device)
+
+        # Step 2: Forward pass
+        # Encode audio
+        audio_features = model.encoder(mel)
+
+        # Decode with teacher forcing
+        logits = model.decoder(input_ids, audio_features)
+
+        # Step 3: Compute loss
+        # Reshape for cross-entropy: (batch * seq_len, vocab_size) vs (batch * seq_len)
+        loss = criterion(
+            logits.reshape(-1, logits.shape[-1]),
+            labels.reshape(-1)
+        )
+
+        # Step 4: Backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+
+        # Gradient clipping to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+        optimizer.step()
+
+        total_loss += loss.item()
+        num_batches += 1
 
     return total_loss / num_batches if num_batches > 0 else 0
 
@@ -245,7 +291,7 @@ def train_epoch(model, dataloader, optimizer, device, epoch):
 
 def main(args):
     print("=" * 70)
-    print("🧠 DENDRITIC WHISPER FULL TRAINING")
+    print("DENDRITIC WHISPER FULL TRAINING")
     print("=" * 70)
 
     # Initialize W&B
@@ -260,15 +306,20 @@ def main(args):
     device = args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nDevice: {device}")
 
-    # Create results directory
-    results_dir = Path("../results") / args.save_name
+    # Create results directory on D: drive to avoid filling C:
+    results_dir = Path(args.results_dir) / args.save_name
     results_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Results directory: {results_dir}")
 
     # Step 1: Load Whisper Small
     print("\n[1/6] Loading Whisper Small...")
     model = whisper.load_model("small", device="cpu")  # Load on CPU first
     baseline_params = sum(p.numel() for p in model.parameters())
     print(f"      Parameters: {baseline_params:,}")
+
+    # Load tokenizer (English-only for LibriSpeech)
+    tokenizer = whisper.tokenizer.get_tokenizer(multilingual=False)
+    print(f"      Tokenizer: English (vocab size {tokenizer.encoding.n_vocab})")
 
     # Step 2: Configure PAI
     print("\n[2/6] Configuring Perforated AI...")
@@ -296,7 +347,7 @@ def main(args):
     )
 
     model = model.to(device)
-    print("      ✅ PAI initialized")
+    print("      [OK] PAI initialized")
 
     # Step 3: Setup optimizer
     print("\n[3/6] Setting up optimizer...")
@@ -318,7 +369,7 @@ def main(args):
     optimizer, scheduler = GPA.pai_tracker.setup_optimizer(model, optim_args, sched_args)
 
     print(f"      Learning rate: {args.learning_rate}")
-    print(f"      ✅ Optimizer configured")
+    print(f"      [OK] Optimizer configured")
 
     # Step 4: Load datasets
     print("\n[4/6] Loading datasets...")
@@ -355,7 +406,7 @@ def main(args):
     print(f"      Validation samples: {len(val_dataset)}")
     if train_loader:
         print(f"      Training samples: {len(train_dataset)}")
-    print("      ✅ Datasets loaded")
+    print("      [OK] Datasets loaded")
 
     # Step 5: Training loop with PAI
     print("\n[5/6] Starting training loop...")
@@ -374,7 +425,7 @@ def main(args):
 
         # Training (if enabled)
         if train_loader:
-            train_loss = train_epoch(model, train_loader, optimizer, device, epoch)
+            train_loss = train_epoch(model, train_loader, optimizer, device, epoch, tokenizer)
             print(f"Train loss: {train_loss:.4f}")
 
         # Validation
@@ -410,7 +461,7 @@ def main(args):
 
         # Handle restructuring (dendrites were added or incorporated)
         if restructured:
-            print("\n🌳 MODEL RESTRUCTURED! Dendrites added/incorporated.")
+            print("\n*** MODEL RESTRUCTURED! Dendrites added/incorporated. ***")
 
             # Count new parameters
             new_params = sum(p.numel() for p in model.parameters())
@@ -421,11 +472,11 @@ def main(args):
 
             # Reinitialize optimizer (required by PAI after restructuring)
             optimizer, scheduler = GPA.pai_tracker.setup_optimizer(model, optim_args, sched_args)
-            print("   ✅ Optimizer reinitialized")
+            print("   [OK] Optimizer reinitialized")
 
         # Training complete
         if training_complete:
-            print("\n🎉 TRAINING COMPLETE!")
+            print("\n*** TRAINING COMPLETE! ***")
             print("   PAI has determined optimal dendrite configuration.")
             print("   Best model has been loaded automatically.")
             break
@@ -433,14 +484,14 @@ def main(args):
         # Track best WER and save checkpoint
         if val_wer < best_wer:
             best_wer = val_wer
-            print(f"\n⭐ New best WER: {best_wer*100:.2f}%")
+            print(f"\n*** New best WER: {best_wer*100:.2f}% ***")
 
             # Save checkpoint for PAI to load when adding dendrites
             try:
                 UPA.save_system(model, args.save_name, "best_model")
-                print("   💾 Checkpoint saved")
+                print("   [OK] Checkpoint saved")
             except Exception as e:
-                print(f"   ⚠️  Checkpoint save warning: {e}")
+                print(f"   [WARNING] Checkpoint save warning: {e}")
 
     # Step 6: Final evaluation
     print("\n[6/6] Final evaluation...")
@@ -450,7 +501,7 @@ def main(args):
 
     # Results summary
     print("\n" + "=" * 70)
-    print("📊 FINAL RESULTS")
+    print("FINAL RESULTS")
     print("=" * 70)
     print(f"Baseline parameters: {baseline_params:,}")
     print(f"Final parameters: {final_params:,}")
@@ -473,13 +524,13 @@ def main(args):
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
 
-    print(f"\n✅ Results saved to: {results_file}")
+    print(f"\n[OK] Results saved to: {results_file}")
 
     if args.use_wandb:
         wandb.log(results)
         wandb.finish()
 
-    print("\n🎉 Training complete!")
+    print("\n*** Training complete! ***")
 
 # =============================================================================
 # Arguments
@@ -520,6 +571,8 @@ def parse_args():
     # Dataset args
     parser.add_argument('--data-dir', type=str, default='./data',
                        help='Data cache directory')
+    parser.add_argument('--results-dir', type=str, default=r'D:\ML_Results\dendritic_whisper',
+                       help='Results output directory (default: D: drive to save C: space)')
     parser.add_argument('--val-max-samples', type=int, default=None,
                        help='Max validation samples to load (None=all)')
     parser.add_argument('--train-max-samples', type=int, default=None,
