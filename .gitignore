@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Data and models
+data/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+results/
+checkpoints/
+*.cache
+
+# Logs
+*.log
+debug_logs/
+test_results/
+load_test_results/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment
+.env
+*.env
+
+# Documentation (keep markdown, ignore generated)
+*.pdf
+*.html
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Dataset downloads
+*.tar.gz
+*.zip
+*.flac
+*.wav
+*.mp3
