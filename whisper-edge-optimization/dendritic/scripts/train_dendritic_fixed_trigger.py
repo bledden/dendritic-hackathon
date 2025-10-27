@@ -470,9 +470,14 @@ def main(args):
     GPA.pc.set_max_dendrites(args.max_dendrites)
     GPA.pc.set_improvement_threshold(args.improvement_threshold)
 
-    # Compression trigger: number of epochs without improvement before adding dendrites
-    # Default is 10, but we use 3 for faster compression (less time carrying candidates)
-    GPA.pc.set_n_epochs_to_switch(args.n_epochs_to_switch)
+    # Compression trigger: FIXED-EPOCH MODE (not history-based)
+    # This ensures compression happens at predictable epochs regardless of WER improvement
+    # Use this when WER keeps improving slowly and never triggers history-based compression
+    GPA.pc.set_switch_mode(GPA.pc.DOING_FIXED_SWITCH)
+    GPA.pc.set_fixed_switch_num(args.fixed_switch_num)
+
+    print(f"      Compression mode: FIXED (every {args.fixed_switch_num} epochs)")
+    print(f"      Expected compressions at epochs: {args.fixed_switch_num}, {args.fixed_switch_num*2}, etc.")
 
     # CRITICAL: Whisper decoder outputs [batch, seq_len, hidden_dim]
     # PAI defaults to conv dimensions [-1, 0, -1, -1] but we need [-1, -1, 0]
@@ -484,7 +489,6 @@ def main(args):
 
     print(f"      Max dendrites: {args.max_dendrites}")
     print(f"      Improvement threshold: {args.improvement_threshold}")
-    print(f"      Compression trigger: {args.n_epochs_to_switch} epochs without improvement")
     print(f"      Input dimensions: {GPA.pc.get_input_dimensions()} (sequence model format)")
 
     # Initialize PAI
@@ -608,19 +612,6 @@ def main(args):
         if training_complete:
             break
 
-        # Check for PAUSE file (user-requested pause)
-        pause_file = results_dir / 'PAUSE'
-        if pause_file.exists():
-            print(f"\n{'='*70}")
-            print("PAUSE REQUESTED")
-            print("="*70)
-            print(f"Training paused after epoch {epoch}")
-            print(f"Last checkpoint saved at epoch {epoch}")
-            print(f"To resume: Run the same command again")
-            print(f"Removing pause file: {pause_file}")
-            pause_file.unlink()
-            break
-
         print(f"\n{'='*70}")
         print(f"Epoch {epoch + 1}/{args.max_epochs}")
         print(f"{'='*70}")
@@ -651,33 +642,6 @@ def main(args):
                 'val_accuracy': val_accuracy,
                 'parameters': sum(p.numel() for p in model.parameters())
             })
-
-        # Check for FORCE_COMPRESS file (manual compression trigger)
-        force_compress_file = results_dir / 'FORCE_COMPRESS'
-        force_compression = False
-
-        if force_compress_file.exists():
-            print(f"\n{'='*70}")
-            print("MANUAL COMPRESSION TRIGGERED")
-            print("="*70)
-            print(f"User requested compression at epoch {epoch + 1}")
-            force_compress_file.unlink()
-            force_compression = True
-
-        # Check for hybrid mode force trigger (every N epochs)
-        if args.compression_mode == 'hybrid' and ((epoch + 1) % args.force_trigger_interval == 0):
-            print(f"\n{'='*70}")
-            print("HYBRID MODE: FORCE TRIGGER")
-            print("="*70)
-            print(f"Forcing compression at epoch {epoch + 1} (interval: {args.force_trigger_interval})")
-            force_compression = True
-
-        # Apply force compression if triggered
-        if force_compression:
-            print(f"Forcing PAI to compress...")
-            # Force PAI to think we've plateaued by adding worse scores
-            for _ in range(args.n_epochs_to_switch):
-                GPA.pai_tracker.add_validation_score(val_accuracy - 0.1, model)
 
         # PAI validation scoring (THIS IS WHERE DENDRITES GET ADDED!)
         print("\nUpdating PAI tracker...")
@@ -766,18 +730,6 @@ def main(args):
 
     print("\n*** Training complete! ***")
 
-    # Clean up GPU memory and resources to prevent crashes
-    print("\nCleaning up...")
-    del model
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()  # Wait for all GPU operations to complete
-    print("[OK] GPU resources released")
-
-    # Force garbage collection
-    import gc
-    gc.collect()
-    print("[OK] Memory cleanup complete")
-
 # =============================================================================
 # Arguments
 # =============================================================================
@@ -797,13 +749,8 @@ def parse_args():
                        help='Maximum number of dendrite cycles to add (default: 3)')
     parser.add_argument('--improvement-threshold', type=float, default=0.0001,
                        help='Minimum improvement to continue training')
-    parser.add_argument('--n-epochs-to-switch', type=int, default=3,
-                       help='Epochs without improvement before compression (default: 3, PAI default: 10)')
-    parser.add_argument('--compression-mode', type=str, default='history',
-                       choices=['history', 'hybrid'],
-                       help='Compression trigger mode: history (wait for plateau) or hybrid (force + plateau)')
-    parser.add_argument('--force-trigger-interval', type=int, default=10,
-                       help='Force compression every N epochs in hybrid mode (default: 10)')
+    parser.add_argument('--fixed-switch-num', type=int, default=8,
+                       help='Compress every N epochs (fixed-epoch mode, default: 8)')
 
     # Optimizer args
     parser.add_argument('--learning-rate', type=float, default=1e-5,
