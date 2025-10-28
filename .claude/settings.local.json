@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(venv/Scripts/pip install:*)"
-    ],
-    "deny": [],
-    "ask": []
-  }
-}
