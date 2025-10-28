@@ -474,6 +474,12 @@ def main(args):
     # Default is 10, but we use 3 for faster compression (less time carrying candidates)
     GPA.pc.set_n_epochs_to_switch(args.n_epochs_to_switch)
 
+    # Max dendrite tries: how many times PAI will retry with different dendrites before giving up
+    # Default is 2, but for long training runs with force triggers we need more attempts
+    # For 35 epochs with force at 10/20/30, we could have 3+ compression events
+    GPA.pc.set_max_dendrite_tries(10)
+    print(f"      Max dendrite tries: 10 (prevents premature training completion)")
+
     # CRITICAL: Whisper decoder outputs [batch, seq_len, hidden_dim]
     # PAI defaults to conv dimensions [-1, 0, -1, -1] but we need [-1, -1, 0]
     # Set to [-1, -1, 0] for sequence models (neuron dimension is LAST, not second)
@@ -602,6 +608,7 @@ def main(args):
         print("      Mixed Precision: Disabled (FP32)")
 
     best_wer = float('inf')
+    prev_wer = None  # Track previous WER for sanity checks
     training_complete = False
 
     for epoch in range(args.max_epochs):
@@ -642,6 +649,28 @@ def main(args):
 
         print(f"Validation WER: {val_wer*100:.2f}%")
         print(f"Validation Accuracy: {val_accuracy*100:.2f}%")
+
+        # Sanity checks: detect validation failures or model degradation
+        if prev_wer is not None:
+            # Check for stuck/identical WER (validation might be broken)
+            if abs(val_wer - prev_wer) < 0.001 and val_wer > 0.15:
+                print(f"\n{'!'*70}")
+                print(f"WARNING: WER unchanged at {val_wer*100:.2f}% (delta < 0.1%)")
+                print(f"This could indicate validation is not running properly!")
+                print(f"{'!'*70}")
+
+            # Check for sudden WER degradation (>10% jump)
+            elif val_wer - prev_wer > 0.10:
+                print(f"\n{'!'*70}")
+                print(f"WARNING: WER increased by {(val_wer - prev_wer)*100:.2f}%")
+                print(f"Model may have degraded after restructuring!")
+                print(f"{'!'*70}")
+
+            # Check for suspicious WER improvement (>5% drop in one epoch - unlikely)
+            elif prev_wer - val_wer > 0.05:
+                print(f"\n[INFO] WER improved by {(prev_wer - val_wer)*100:.2f}% (significant improvement)")
+
+        prev_wer = val_wer  # Update for next epoch
 
         # Log to W&B
         if args.use_wandb:
@@ -704,6 +733,10 @@ def main(args):
             # If restructured during force, skip real score (already restructured)
             if restructured_during_force:
                 restructured = True
+                # IMPORTANT: Check if training completed during force trigger
+                if training_complete:
+                    print("   [!] PAI returned training_complete during forced restructuring")
+                    print("   [!] This means max_dendrite_tries was reached")
                 print("   [SKIP] Real validation score - already restructured via force")
             else:
                 # Normal: add real validation score
@@ -758,6 +791,13 @@ def main(args):
                 print("   [OK] Checkpoint saved")
             except Exception as e:
                 print(f"   [WARNING] Checkpoint save warning: {e}")
+
+        # Periodic memory cleanup to prevent fragmentation
+        # Clear cache every 3 epochs (even without restructuring) to combat memory fragmentation
+        # This addresses the issue where memory balloons from 12GB to 40GB at epoch 3
+        if (epoch + 1) % 3 == 0 and not restructured:
+            torch.cuda.empty_cache()
+            print(f"   [CLEANUP] GPU memory cache cleared (periodic, epoch {epoch + 1})")
 
     # Step 6: Final evaluation
     print("\n[6/6] Final evaluation...")
