@@ -474,11 +474,9 @@ def main(args):
     # Default is 10, but we use 3 for faster compression (less time carrying candidates)
     GPA.pc.set_n_epochs_to_switch(args.n_epochs_to_switch)
 
-    # Max dendrite tries: how many times PAI will retry with different dendrites before giving up
-    # Default is 2, but for long training runs with force triggers we need more attempts
-    # For 35 epochs with force at 10/20/30, we could have 3+ compression events
-    GPA.pc.set_max_dendrite_tries(10)
-    print(f"      Max dendrite tries: 10 (prevents premature training completion)")
+    # NOTE: max_dendrite_tries removed for perforatedbp compatibility
+    # perforatedbp has its own compression logic and doesn't need extended retries
+    # The default value (2) will be used automatically
 
     # CRITICAL: Whisper decoder outputs [batch, seq_len, hidden_dim]
     # PAI defaults to conv dimensions [-1, 0, -1, -1] but we need [-1, -1, 0]
@@ -681,31 +679,35 @@ def main(args):
                 'parameters': sum(p.numel() for p in model.parameters())
             })
 
-        # Check for FORCE_COMPRESS file (manual compression trigger)
-        force_compress_file = results_dir / 'FORCE_COMPRESS'
-        force_compression = False
+        # NOTE: Force compression logic disabled for perforatedbp compatibility
+        # perforatedbp handles compression scheduling automatically
+        # Uncomment this section only if using open-source PAI without perforatedbp
 
-        if force_compress_file.exists():
-            print(f"\n{'='*70}")
-            print("MANUAL COMPRESSION TRIGGERED")
-            print("="*70)
-            print(f"User requested compression at epoch {epoch + 1}")
-            force_compress_file.unlink()
-            force_compression = True
-
-        # Check for hybrid mode force trigger (every N epochs)
-        if args.compression_mode == 'hybrid' and ((epoch + 1) % args.force_trigger_interval == 0):
-            print(f"\n{'='*70}")
-            print("HYBRID MODE: FORCE TRIGGER")
-            print("="*70)
-            print(f"Forcing compression at epoch {epoch + 1} (interval: {args.force_trigger_interval})")
-            force_compression = True
+        # # Check for FORCE_COMPRESS file (manual compression trigger)
+        # force_compress_file = results_dir / 'FORCE_COMPRESS'
+        # force_compression = False
+        #
+        # if force_compress_file.exists():
+        #     print(f"\n{'='*70}")
+        #     print("MANUAL COMPRESSION TRIGGERED")
+        #     print("="*70)
+        #     print(f"User requested compression at epoch {epoch + 1}")
+        #     force_compress_file.unlink()
+        #     force_compression = True
+        #
+        # # Check for hybrid mode force trigger (every N epochs)
+        # if args.compression_mode == 'hybrid' and ((epoch + 1) % args.force_trigger_interval == 0):
+        #     print(f"\n{'='*70}")
+        #     print("HYBRID MODE: FORCE TRIGGER")
+        #     print("="*70)
+        #     print(f"Forcing compression at epoch {epoch + 1} (interval: {args.force_trigger_interval})")
+        #     force_compression = True
 
         # PAI validation scoring (THIS IS WHERE DENDRITES GET ADDED!)
         print("\nUpdating PAI tracker...")
 
         # Apply force compression if triggered
-        if force_compression:
+        if False:  # Disabled - see note above
             print(f"Forcing PAI to compress by adding artificial plateau scores...")
             # Force PAI to think we've plateaued by adding worse scores
             # IMPORTANT: Must reinitialize optimizer if restructuring happens mid-loop
