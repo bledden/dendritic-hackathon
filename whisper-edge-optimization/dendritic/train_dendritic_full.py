@@ -672,19 +672,51 @@ def main(args):
             print(f"Forcing compression at epoch {epoch + 1} (interval: {args.force_trigger_interval})")
             force_compression = True
 
-        # Apply force compression if triggered
-        if force_compression:
-            print(f"Forcing PAI to compress...")
-            # Force PAI to think we've plateaued by adding worse scores
-            for _ in range(args.n_epochs_to_switch):
-                GPA.pai_tracker.add_validation_score(val_accuracy - 0.1, model)
-
         # PAI validation scoring (THIS IS WHERE DENDRITES GET ADDED!)
         print("\nUpdating PAI tracker...")
-        model, restructured, training_complete = GPA.pai_tracker.add_validation_score(
-            val_accuracy,  # PAI maximizes this
-            model
-        )
+
+        # Apply force compression if triggered
+        if force_compression:
+            print(f"Forcing PAI to compress by adding artificial plateau scores...")
+            # Force PAI to think we've plateaued by adding worse scores
+            # IMPORTANT: Must reinitialize optimizer if restructuring happens mid-loop
+            restructured_during_force = False
+            for i in range(args.n_epochs_to_switch):
+                print(f"   Adding fake score {i+1}/{args.n_epochs_to_switch}: {val_accuracy - 0.1:.4f}")
+
+                model, restructured_temp, training_complete = GPA.pai_tracker.add_validation_score(
+                    val_accuracy - 0.1,
+                    model
+                )
+
+                if restructured_temp:
+                    print(f"   [!] Restructuring triggered on fake score {i+1}")
+                    restructured_during_force = True
+
+                    # Move model to device and reinitialize optimizer immediately
+                    model = model.to(device)
+                    optimizer, scheduler = GPA.pai_tracker.setup_optimizer(model, optim_args, sched_args)
+                    print("   [OK] Optimizer reinitialized after forced restructuring")
+
+                    # Don't add more scores - optimizer would be invalid
+                    break
+
+            # If restructured during force, skip real score (already restructured)
+            if restructured_during_force:
+                restructured = True
+                print("   [SKIP] Real validation score - already restructured via force")
+            else:
+                # Normal: add real validation score
+                model, restructured, training_complete = GPA.pai_tracker.add_validation_score(
+                    val_accuracy,
+                    model
+                )
+        else:
+            # Normal path - just add the real validation score
+            model, restructured, training_complete = GPA.pai_tracker.add_validation_score(
+                val_accuracy,
+                model
+            )
 
         # Move back to device after potential restructuring
         model = model.to(device)
